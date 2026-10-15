@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Carnet de tir</title>
+  <meta name="description" content="Compter les points d'une volée de tir à l'arc à partir de deux photos de la cible, et suivre sa progression.">
+  <meta name="theme-color" content="#1d2a3a">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <header class="topbar no-print">
+    <a href="#/" class="brand"><img src="icons/icon.svg" alt="" width="28" height="28"> Carnet de tir</a>
+    <select id="archer-select" aria-label="Archer" hidden></select>
+  </header>
+  <main id="view" class="container"></main>
+  <nav class="tabbar no-print">
+    <a href="#/"><span>🎯</span>Séances</a>
+    <a href="#/stats"><span>📈</span>Stats</a>
+    <a href="#/archers"><span>👤</span>Archers</a>
+    <a href="#/reglages"><span>⚙️</span>Réglages</a>
+  </nav>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <div id="tip" class="tooltip" hidden></div>
+  <script src="js/db.js"></script>
+  <script src="js/faces.js"></script>
+  <script src="js/stats.js"></script>
+  <script src="js/vision.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
