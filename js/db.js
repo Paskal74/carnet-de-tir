@@ -1,7 +1,7 @@
 /* db.js — stockage local (IndexedDB) : archers, séances, réglages. Tout reste sur l'appareil. */
 const DB = (() => {
   'use strict';
-  const NAME = 'archerie', VERSION = 1;
+  const NAME = 'archerie', VERSION = 2;
   let dbp = null;
 
   function open() {
@@ -13,6 +13,8 @@ const DB = (() => {
         if (!db.objectStoreNames.contains('archers')) db.createObjectStore('archers', { keyPath: 'id' });
         if (!db.objectStoreNames.contains('sessions')) db.createObjectStore('sessions', { keyPath: 'id' }).createIndex('archerId', 'archerId');
         if (!db.objectStoreNames.contains('settings')) db.createObjectStore('settings');
+        // v2 : photos des volées (restent sur l'appareil, ne sont pas synchronisées)
+        if (!db.objectStoreNames.contains('photos')) db.createObjectStore('photos', { keyPath: 'id' }).createIndex('sessionId', 'sessionId');
       };
       r.onsuccess = () => res(r.result);
       r.onerror = () => rej(r.error);
@@ -54,5 +56,18 @@ const DB = (() => {
     return n;
   }
 
-  return { all, get, put, remove, getSetting, setSetting, mergeRecords, uid };
+  // ---- photos : { id, sessionId, key ('03', '03b'…), side ('G'|'D'), name, blob, createdAt }
+  // Elles sont indépendantes des volées : supprimer une volée ne supprime pas ses photos.
+  async function photosOfSession(sessionId) {
+    const rows = await req((await store('photos')).index('sessionId').getAll(sessionId));
+    return rows.sort((a, b) => a.key.localeCompare(b.key) || a.side.localeCompare(b.side));
+  }
+  async function putPhoto(p) { await req((await store('photos', 'readwrite')).put(p)); return p; }
+  async function deletePhoto(id) { return req((await store('photos', 'readwrite')).delete(id)); }
+  async function allPhotosMeta() { // sans charger les images en mémoire inutilement : on ne garde que les tailles
+    const rows = await req((await store('photos')).getAll());
+    return rows.map((p) => ({ id: p.id, sessionId: p.sessionId, size: p.blob?.size || 0 }));
+  }
+
+  return { all, get, put, remove, getSetting, setSetting, mergeRecords, uid, photosOfSession, putPhoto, deletePhoto, allPhotosMeta };
 })();

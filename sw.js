@@ -1,6 +1,6 @@
 /* sw.js — fonctionnement hors ligne : l'application est mise en cache à la première visite. */
-const CACHE = 'carnet-tir-v2';
-const FILES = ['./', 'index.html', 'css/app.css', 'js/db.js', 'js/faces.js', 'js/stats.js', 'js/vision.js', 'js/app.js',
+const CACHE = 'carnet-tir-v3';
+const FILES = ['./', 'index.html', 'css/app.css', 'js/db.js', 'js/faces.js', 'js/stats.js', 'js/vision.js', 'js/photos.js', 'js/app.js',
   'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {

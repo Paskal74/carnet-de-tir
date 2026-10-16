@@ -24,6 +24,7 @@
     if (!archer()) state.archerId = state.archers[0]?.id || null;
     state.settings.arrowDiam = await DB.getSetting('arrowDiam', 8);
     state.settings.sheetsUrl = await DB.getSetting('sheetsUrl', '');
+    state.settings.photoCopy = await DB.getSetting('photoCopy', true);
     renderArcherSelect();
   }
   function renderArcherSelect() {
@@ -190,6 +191,7 @@
         <div class="stars" role="radiogroup" aria-label="Note de la séance">${[1, 2, 3, 4, 5].map((n) => `<button type="button" data-star="${n}" class="${(s.feeling?.rating || 0) >= n ? 'on' : ''}" aria-label="${n} sur 5">★</button>`).join('')}</div>
         <textarea id="feel" rows="3" placeholder="Sensations, points techniques travaillés, fatigue…">${esc(s.feeling?.text || '')}</textarea>
       </section>
+      <section class="card" id="ph-sec" hidden></section>
       <div class="row wrap actions">
         <a class="btn" href="#/s/${s.id}/feuille">📄 Feuille de marque (PDF)</a>
         <button class="btn danger" id="del">Supprimer la séance</button>
@@ -202,10 +204,47 @@
     }; });
     $('#feel').onchange = async (e) => { s.feeling = { ...(s.feeling || {}), text: e.target.value }; await DB.put('sessions', s); toast('Ressenti enregistré'); };
     $('#del').onclick = async () => {
-      if (!confirm('Supprimer définitivement cette séance ?')) return;
+      if (!confirm('Supprimer définitivement cette séance et ses photos ?')) return;
       await DB.remove('sessions', s.id);
+      await Photos.deleteSession(s.id);
       location.hash = '#/';
     };
+    renderSessionPhotos(s);
+  }
+
+  // galerie des photos de la séance (rattachées ou non à une volée)
+  async function renderSessionPhotos(s) {
+    const sec = $('#ph-sec');
+    if (!sec) return;
+    const pairs = await Photos.pairs(s.id);
+    if (!pairs.length) { sec.hidden = true; return; }
+    const usedBy = new Map((s.ends || []).map((e, i) => [e.photoKey, i + 1]));
+    const all = pairs.flatMap((p) => [p.G, p.D].filter(Boolean));
+    const size = all.reduce((t, p) => t + p.blob.size, 0);
+    sec.hidden = false;
+    sec.innerHTML = `
+      <div class="row between wrap"><h2>Photos de la séance</h2>
+        <button class="btn small" type="button" id="ph-all">⬇ Tout copier dans le téléphone</button></div>
+      <p class="muted small">${all.length} photo(s) · ${Photos.fmtSize(size)} · conservées sur cet appareil, même si une volée est supprimée.</p>
+      <div class="pair-gallery">${pairs.map((p) => `
+        <div class="pair-card">
+          <div class="pair-imgs">${['G', 'D'].map((sd) => (p[sd] ? `<figure><img src="${URL.createObjectURL(p[sd].blob)}" alt="${esc(p[sd].name)}" loading="lazy"><figcaption>${esc(p[sd].name)}</figcaption></figure>` : '<figure class="ph-empty"></figure>')).join('')}</div>
+          <div class="row wrap">
+            <span class="muted small">${usedBy.has(p.key) ? `Volée ${usedBy.get(p.key)}` : 'Non rattachée à une volée'}</span>
+            <button class="btn small" type="button" data-dl="${p.key}">⬇ Copier</button>
+            ${Photos.canShare([p.G || p.D]) ? `<button class="btn small" type="button" data-share="${p.key}">↗ Partager</button>` : ''}
+            ${usedBy.has(p.key) ? '' : `<button class="btn small danger" type="button" data-rm="${p.key}">Supprimer</button>`}
+          </div>
+        </div>`).join('')}</div>`;
+    const pick = (key) => { const p = pairs.find((x) => x.key === key); return [p.G, p.D].filter(Boolean); };
+    $('#ph-all').onclick = () => Photos.downloadAll(all);
+    $$('[data-dl]', sec).forEach((b) => { b.onclick = () => Photos.downloadAll(pick(b.dataset.dl)); });
+    $$('[data-share]', sec).forEach((b) => { b.onclick = () => Photos.share(pick(b.dataset.share)).catch(() => {}); });
+    $$('[data-rm]', sec).forEach((b) => { b.onclick = async () => {
+      if (!confirm('Supprimer définitivement ces deux photos de l\'application ?')) return;
+      await Photos.deletePair(s.id, b.dataset.rm);
+      renderSessionPhotos(s);
+    }; });
   }
 
   // ======================================================================= volée
@@ -216,13 +255,16 @@
     const isNew = n === 'new', idx = isNew ? (s.ends || []).length : +n;
     const end = isNew ? { arrows: [] } : JSON.parse(JSON.stringify(s.ends[idx]));
     const photos = [null, null];
-    let selected = -1, zoom = false, analysis = null;
+    // photoKey : paire enregistrée actuellement chargée telle quelle (null = nouvelles photos à enregistrer)
+    let selected = -1, zoom = false, analysis = null, photoKey = null;
+    const savedPairs = await Photos.pairs(s.id);
 
     view.innerHTML = `
       <div class="row between"><h1>Volée ${idx + 1}</h1><a class="btn small" href="#/s/${s.id}">Retour</a></div>
       <section class="card">
         <h2>1. Photos de la cible</h2>
         <p class="muted small">Photo de <b>gauche</b> puis photo de <b>droite</b>, toute la cible dans le cadre, avant de retirer les flèches.</p>
+        <div id="reuse"></div>
         <div class="photos">${['gauche', 'droite'].map((side, i) => `
           <div class="photo-slot" data-i="${i}">
             <div class="thumb" id="thumb${i}"><span>Photo ${side}</span></div>
@@ -253,15 +295,46 @@
       </div>`;
 
     // ---- photos
+    const showPhoto = (i, blob, label) => {
+      photos[i] = blob;
+      $('#thumb' + i).innerHTML = blob ? `<img src="${URL.createObjectURL(blob)}" alt="Photo ${i ? 'droite' : 'gauche'}">${label ? `<span class="thumb-name">${esc(label)}</span>` : ''}` : `<span>Photo ${i ? 'droite' : 'gauche'}</span>`;
+      $('#analyze').disabled = !photos.some(Boolean);
+    };
+    const loadPair = (p) => {
+      showPhoto(0, p.G?.blob || null, p.G?.name);
+      showPhoto(1, p.D?.blob || null, p.D?.name);
+      photoKey = p.key;
+      renderReuse();
+    };
+    // clés déjà rattachées à une autre volée de la séance
+    const usedKeys = new Set((s.ends || []).filter((_, i) => i !== idx).map((e) => e.photoKey).filter(Boolean));
+    function renderReuse() {
+      const box = $('#reuse');
+      if (!savedPairs.length) { box.innerHTML = ''; return; }
+      // suggestion : photos portant le numéro de cette volée et rattachées à aucune autre volée
+      const sugg = !photoKey && savedPairs.find((p) => p.num === idx + 1 && !usedKeys.has(p.key));
+      box.innerHTML = `
+        ${sugg ? `<div class="reuse-hint">📁 Des photos enregistrées existent pour la volée ${idx + 1} (<b>${esc((sugg.G || sugg.D).name.replace(/-[GD]\.jpg$/, ''))}</b>).
+          <button type="button" class="btn small primary" data-reuse="${sugg.key}">Réutiliser ces photos</button></div>` : ''}
+        <details class="reuse-list"><summary>📂 Photos enregistrées de cette séance (${savedPairs.length})</summary>
+          <div class="pair-list">${savedPairs.map((p) => `
+            <button type="button" class="pair-pick ${p.key === photoKey ? 'on' : ''}" data-reuse="${p.key}">
+              ${['G', 'D'].map((sd) => (p[sd] ? `<img src="${URL.createObjectURL(p[sd].blob)}" alt="">` : '<span class="ph-empty"></span>')).join('')}
+              <span>Volée ${p.key}${usedKeys.has(p.key) ? ' · utilisée' : ''}</span></button>`).join('')}</div>
+        </details>`;
+      $$('[data-reuse]', box).forEach((b) => { b.onclick = () => { loadPair(savedPairs.find((p) => p.key === b.dataset.reuse)); toast('Photos chargées : touchez « Analyser » pour recompter.'); }; });
+    }
     $$('input[data-photo]').forEach((inp) => { inp.onchange = () => {
       const file = inp.files[0];
       if (!file) return;
-      const i = +inp.dataset.photo;
-      photos[i] = file;
-      $('#thumb' + i).innerHTML = `<img src="${URL.createObjectURL(file)}" alt="Photo ${i ? 'droite' : 'gauche'}">`;
-      $('#analyze').disabled = !photos.some(Boolean);
+      showPhoto(+inp.dataset.photo, file);
+      photoKey = null; // nouvelle photo : la paire sera enregistrée à part
+      renderReuse();
       inp.value = '';
     }; });
+    // volée existante : on recharge ses photos pour pouvoir les revoir ou relancer l'analyse
+    if (!isNew && end.photoKey) { const p = savedPairs.find((x) => x.key === end.photoKey); if (p) loadPair(p); }
+    renderReuse();
     $('#analyze').onclick = async () => {
       const btn = $('#analyze'), st = $('#an-status');
       btn.disabled = true; st.textContent = 'Analyse en cours… (quelques secondes)';
@@ -395,14 +468,26 @@
       if (end.arrows.length !== apE && !confirm(`Cette volée contient ${end.arrows.length} flèche(s) au lieu de ${apE}. Enregistrer quand même ?`)) return;
       end.arrows.forEach((a) => { delete a.doubt; delete a.auto; });
       end.at = end.at || Date.now();
+      // photos : nouvelles → enregistrées et nommées ; réutilisées → simple rattachement
+      let copied = 0;
+      if (photos.some(Boolean) && !photoKey) {
+        const btn = $('#save');
+        btn.disabled = true; btn.textContent = 'Enregistrement des photos…';
+        try {
+          const { key, saved } = await Photos.savePair(s, idx + 1, photos);
+          end.photoKey = key;
+          Photos.persist();
+          if (state.settings.photoCopy) { await Photos.downloadAll(saved); copied = saved.length; }
+        } catch (e) { console.error(e); toast('Photos non enregistrées : ' + e.message); }
+      } else if (photoKey) end.photoKey = photoKey;
       s.ends = s.ends || [];
       if (isNew) s.ends.push(end); else s.ends[idx] = end;
       await DB.put('sessions', s);
-      toast(`Volée ${idx + 1} enregistrée : ${Stats.endTotal(end)} pts`);
+      toast(`Volée ${idx + 1} enregistrée : ${Stats.endTotal(end)} pts${end.photoKey ? ` · photos ${s.date}-${s.distance}m-${end.photoKey}` : ''}${copied ? ' (copiées dans Téléchargements)' : ''}`, 3500);
       location.hash = '#/s/' + s.id;
     };
     if (!isNew) $('#del-end').onclick = async () => {
-      if (!confirm('Supprimer cette volée ?')) return;
+      if (!confirm('Supprimer cette volée ?' + (end.photoKey ? '\n(Ses photos restent enregistrées : vous pourrez les réutiliser en recréant la volée.)' : ''))) return;
       s.ends.splice(idx, 1);
       await DB.put('sessions', s);
       location.hash = '#/s/' + s.id;
@@ -533,6 +618,12 @@
       <section class="card stack"><h2>Flèches</h2>
         <label>Diamètre des tubes (mm)<input type="number" id="diam" min="4" max="12" step="0.1" value="${state.settings.arrowDiam}"></label>
         <p class="muted small">Sert à compter les flèches « sur la ligne » (qui comptent pour la zone supérieure). Bois 5/16″ ≈ 7,9 mm · 11/32″ ≈ 8,7 mm.</p></section>
+      <section class="card stack"><h2>Photos des volées</h2>
+        <p class="muted small">Les deux photos de chaque volée sont conservées dans l'application, nommées <code>date-distance-volée-G</code> / <code>-D</code>
+          (ex. <code>2026-10-15-18m-03-G.jpg</code>). Elles restent disponibles si vous supprimez puis recréez une volée.</p>
+        <label class="check"><input type="checkbox" id="ph-copy" ${state.settings.photoCopy ? 'checked' : ''}>
+          Copier aussi automatiquement chaque photo dans le téléphone (dossier Téléchargements)</label>
+        <p id="ph-usage" class="muted small">Calcul de l'espace utilisé…</p></section>
       <section class="card stack"><h2>Synchronisation Google Sheets</h2>
         <p class="muted small">Permet de retrouver vos séances sur le PC et le smartphone. Installez le script fourni (fichier <code>google-apps-script/Code.gs</code>, voir LISEZMOI) puis collez ici l'URL de l'application Web.</p>
         <label>URL du script<input id="sheets" type="url" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(state.settings.sheetsUrl)}"></label>
@@ -544,6 +635,14 @@
       <section class="card stack"><h2>Application</h2>
         <p class="muted small">Fonctionne hors ligne une fois installée. Toutes les données restent sur cet appareil (sauf si vous synchronisez avec votre Google Sheets).</p>
         <button class="btn" id="install" hidden>📲 Installer l'application</button></section>`;
+    $('#ph-copy').onchange = async (e) => { state.settings.photoCopy = e.target.checked; await DB.setSetting('photoCopy', state.settings.photoCopy); };
+    (async () => {
+      const meta = await DB.allPhotosMeta(), size = meta.reduce((t, p) => t + p.size, 0);
+      let free = '';
+      try { const est = await navigator.storage.estimate(); if (est.quota) free = ` · place disponible pour l'application : ${Photos.fmtSize(est.quota - est.usage)}`; } catch { /* non disponible */ }
+      const persisted = navigator.storage?.persisted ? await navigator.storage.persisted() : false;
+      $('#ph-usage').textContent = `${meta.length} photo(s) enregistrée(s), ${Photos.fmtSize(size)}${free}${persisted ? ' · stockage protégé contre l\'effacement automatique' : ''}.`;
+    })();
     $('#diam').onchange = async (e) => { state.settings.arrowDiam = +e.target.value || 8; await DB.setSetting('arrowDiam', state.settings.arrowDiam); toast('Diamètre enregistré'); };
     $('#sheets').onchange = async (e) => { state.settings.sheetsUrl = e.target.value.trim(); await DB.setSetting('sheetsUrl', state.settings.sheetsUrl); };
     $('#sync').onclick = async () => {
